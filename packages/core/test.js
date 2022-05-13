@@ -1,7 +1,7 @@
 import MuteStream from 'mute-stream';
 // eslint-disable-next-line node/no-extraneous-import
 import { jest } from '@jest/globals';
-import { createPrompt } from './index.js';
+import { createPrompt } from './dist/index.js';
 
 jest.useFakeTimers();
 
@@ -167,7 +167,10 @@ describe('createPrompt()', () => {
 
     // New input will clear the error message
     input.emit('keypress', null, { name: 'a' });
-    expect(render).toHaveBeenLastCalledWith(expect.objectContaining({ error: null }), {});
+    expect(render).toHaveBeenLastCalledWith(
+      expect.objectContaining({ error: undefined }),
+      {}
+    );
   });
 
   it('submit: handle validation error (rejected promise)', async () => {

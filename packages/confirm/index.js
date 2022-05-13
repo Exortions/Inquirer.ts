@@ -1,7 +1,7 @@
 import chalk from 'chalk';
-import { createPrompt, useState, useKeypress } from '@inquirer/core/hooks.js';
-import { isEnterKey } from '@inquirer/core/lib/key.js';
-import { usePrefix } from '@inquirer/core/lib/prefix.js';
+import { createPrompt, useState, useKeypress } from '@inquirer/core/dist/hooks.js';
+import { isEnterKey } from '@inquirer/core/dist/lib/key.js';
+import { usePrefix } from '@inquirer/core/dist/lib/prefix.js';
 
 export default createPrompt((config, done) => {
   const [status, setStatus] = useState('pending');

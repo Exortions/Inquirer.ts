@@ -1,4 +1,4 @@
-import readline from 'node:readline';
+import * as readline from 'node:readline';
 import chalk from 'chalk';
 import MuteStream from 'mute-stream';
 import runAsync from 'run-async';
@@ -7,13 +7,73 @@ import ScreenManager from './lib/screen-manager.js';
 
 const spinner = spinners.dots;
 
-const defaultState = {
-  validate: () => true,
-  filter: (val) => val,
-  transformer: (val) => val,
+type Status = 'idle' | 'loading' | 'done';
+type FullState<Value> = {
+  loadingIncrement: number;
+  value: string;
+  status: Status;
+  default: string;
+  message: string;
+  error?: string;
+  prefix?: string;
+  validate: (value: string) => boolean | string | Promise<boolean | string>;
+  filter: (value: string) => Value;
+  transformer: (value: string, flags: { isFinal: boolean }) => string;
 };
 
-const defaultMapStateToValue = (state) => {
+type RenderState = {
+  prefix: string;
+  message: string;
+  value: string;
+  validate?: undefined;
+  filter?: undefined;
+  transformer?: undefined;
+};
+
+type ConfigObject<Value> = {
+  onKeypress?: (
+    line: string,
+    key: { name: string },
+    state: FullState<Value>,
+    setState: (state: Partial<FullState<Value>>) => void
+  ) => unknown;
+  onLine?: (
+    state: FullState<Value>,
+    callbacks: {
+      submit: () => void;
+      setState: (state: Partial<FullState<Value>>) => void;
+    }
+  ) => void;
+  mapStateToValue?: (state: FullState<Value>) => Value;
+  validate: (value: string, state: FullState<Value>) => boolean | string;
+  configValidate?: () => unknown;
+};
+
+type ConfigFactory<Value> =
+  | ConfigObject<Value>
+  | ((readline: readline.ReadLine) => ConfigObject<Value>);
+
+type RenderFunction<Value, State> = (
+  state: Omit<State, keyof RenderState> & RenderState,
+  config: ConfigObject<Value>
+) => string;
+
+type StdioOptions = {
+  input?: NodeJS.ReadableStream;
+  output?: NodeJS.WritableStream;
+};
+
+const defaultState = {
+  loadingIncrement: 0,
+  value: '',
+  status: 'idle',
+  error: undefined,
+  validate: () => true,
+  filter: (val: unknown) => val,
+  transformer: (val: unknown) => val,
+};
+
+const defaultMapStateToValue = (state: FullState<unknown>) => {
   if (!state.value) {
     return state.default;
   }
@@ -21,17 +81,33 @@ const defaultMapStateToValue = (state) => {
   return state.value;
 };
 
-const defaultOnLine = (state, { submit }) => submit();
+const defaultOnLine = (
+  _state: FullState<unknown>,
+  { submit }: { submit: () => unknown }
+) => submit();
 
-class StateManager {
-  constructor(configFactory, initialState, render, stdio) {
-    this.initialState = initialState;
+class StateManager<
+  Value extends string,
+  State extends FullState<Value>,
+  Render extends RenderFunction<Value, State>
+> {
+  private readonly config: ConfigObject<Value>;
+  private readonly screen: ScreenManager;
+  private readonly rl: readline.ReadLine;
+
+  private currentState: Partial<FullState<Value>>;
+  private cb?: (value: Value) => unknown;
+
+  constructor(
+    configFactory: ConfigFactory<Value>,
+    private readonly initialState: State,
+    private readonly render: Render,
+    stdio?: StdioOptions
+  ) {
     this.render = render;
-    this.currentState = {
-      loadingIncrement: 0,
-      value: '',
-      status: 'idle',
-    };
+    this.initialState = initialState;
+
+    this.currentState = {};
 
     // Add mute capabilities to the output
     const output = new MuteStream();
@@ -44,11 +120,8 @@ class StateManager {
     });
     this.screen = new ScreenManager(this.rl);
 
-    let config = configFactory;
-    if (typeof configFactory === 'function') {
-      config = configFactory(this.rl);
-    }
-    this.config = config;
+    this.config =
+      typeof configFactory === 'function' ? configFactory(this.rl) : configFactory;
 
     this.onKeypress = this.onKeypress.bind(this);
     this.onSubmit = this.onSubmit.bind(this);
@@ -58,7 +131,7 @@ class StateManager {
     this.handleLineEvent = this.handleLineEvent.bind(this);
   }
 
-  async execute(cb) {
+  async execute(cb: (value: Value) => unknown) {
     let { message } = this.getState();
     this.cb = cb;
 
@@ -74,18 +147,18 @@ class StateManager {
     clearTimeout(showLoader);
 
     // Setup event listeners once we're done fetching the configs
-    this.rl.input.on('keypress', this.onKeypress);
+    ((this.rl as any).input as NodeJS.ReadableStream).on('keypress', this.onKeypress);
     this.rl.on('line', this.handleLineEvent);
   }
 
-  onKeypress(value, key) {
+  onKeypress(_input: string, key: { name: string }) {
     const { onKeypress } = this.config;
     // Ignore enter keypress. The "line" event is handling those.
     if (key.name === 'enter' || key.name === 'return') {
       return;
     }
 
-    this.setState({ value: this.rl.line, error: null });
+    this.setState({ value: this.rl.line, error: undefined });
     if (onKeypress) {
       onKeypress(this.rl.line, key, this.getState(), this.setState);
     }
@@ -115,7 +188,7 @@ class StateManager {
   async onSubmit() {
     const state = this.getState();
     const { validate, filter } = state;
-    const { validate: configValidate = () => true } = this.config;
+    const { validate: configValidate = defaultState.validate } = this.config;
 
     const { mapStateToValue = defaultMapStateToValue } = this.config;
     const value = mapStateToValue(state);
@@ -136,35 +209,44 @@ class StateManager {
       }
 
       this.onError(isValid);
-    } catch (err) {
-      this.onError(err.message + '\n' + err.stack);
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        this.onError([err.message, err.stack].filter(Boolean).join('\n'));
+      }
     }
 
     clearTimeout(showLoader);
     this.rl.resume();
   }
 
-  onError(error) {
+  onError(error: false | string) {
     this.setState({
       status: 'idle',
       error: error || 'You must provide a valid value',
     });
   }
 
-  onDone(value) {
+  onDone(value: Value) {
+    if (typeof this.cb !== 'function') {
+      throw new Error('StateManager#execute must be called before StateManager#onDone');
+    }
+
     this.setState({ status: 'done' });
-    this.rl.input.removeListener('keypress', this.onKeypress);
+    ((this.rl as any).input as NodeJS.ReadableStream).removeListener(
+      'keypress',
+      this.onKeypress
+    );
     this.rl.removeListener('line', this.handleLineEvent);
     this.screen.done();
     this.cb(value);
   }
 
-  setState(partialState) {
+  setState(partialState: Partial<FullState<Value>>) {
     this.currentState = { ...this.currentState, ...partialState };
     this.onChange(this.getState());
   }
 
-  getState() {
+  getState(): FullState<Value> {
     return { ...defaultState, ...this.initialState, ...this.currentState };
   }
 
@@ -179,7 +261,7 @@ class StateManager {
     return prefix;
   }
 
-  onChange(state) {
+  onChange(state: FullState<Value>) {
     const { status, message, value, transformer } = this.getState();
 
     let error;
@@ -197,12 +279,21 @@ class StateManager {
       filter: undefined,
       transformer: undefined,
     };
-    this.screen.render(this.render(renderState, this.config), error);
+
+    this.screen.render(
+      // @ts-expect-error: I didn't figure out this error yet.
+      this.render(renderState, this.config),
+      error
+    );
   }
 }
 
-export const createPrompt = (config, render) => {
-  const run = (initialState, stdio) =>
+export function createPrompt<
+  Value extends string,
+  State extends FullState<Value>,
+  Render extends RenderFunction<Value, State>
+>(config: ConfigFactory<Value>, render: Render) {
+  const run = async (initialState: State, stdio?: StdioOptions) =>
     new Promise((resolve) => {
       const prompt = new StateManager(config, initialState, render, stdio);
       prompt.execute(resolve);
@@ -212,4 +303,4 @@ export const createPrompt = (config, render) => {
   run.config = config;
 
   return run;
-};
+}
