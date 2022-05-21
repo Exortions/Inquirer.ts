@@ -20,6 +20,7 @@ jobs:
         run: |
           node --version
           yarn
+          yarn bin jest
           yarn test
         env:
           CI: true
