@@ -75,6 +75,10 @@ export default class ScreenManager {
     }
 
     // Reset cursor at the beginning of the line
+    const lastLineFromFullContent = lastLine(fullContent);
+    if (!lastLineFromFullContent) {
+      return;
+    }
     util.left(this.rl, stringWidth(lastLine(fullContent)));
 
     // Adjust cursor on the right
